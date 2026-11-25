@@ -106,9 +106,7 @@ async def get_citation(book_id: str):
         return {"id": book_id, "citation": await engine.get_citation(book_id)}
 
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+
 
 import shutil
 import subprocess
@@ -192,3 +190,8 @@ async def convert_uploaded_file(
         filename=out_path.name,
         media_type="application/octet-stream",
     )
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8080))
+    uvicorn.run(app, host="0.0.0.0", port=port)
