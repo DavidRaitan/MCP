@@ -12,7 +12,7 @@ mcp = FastMCP("ComparativeResearchMCP", host="0.0.0.0", port=port)
 
 @asynccontextmanager
 async def get_engine():
-    async with streamable_http_client(ENDPOINT_URL, timeout=30.0) as (read_stream, write_stream, _):
+    async with streamable_http_client(ENDPOINT_URL) as (read_stream, write_stream, _):
         async with ClientSession(read_stream, write_stream) as session:
             await session.initialize()
             yield LibraryEngine(session)
