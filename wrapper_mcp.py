@@ -7,7 +7,29 @@ from mcp.client.streamable_http import streamable_http_client
 from library_backend import LibraryEngine, ENDPOINT_URL, classify_record
 
 port = int(os.environ.get("PORT", 8000))
-mcp = FastMCP("ComparativeResearchMCP", host="0.0.0.0", port=port)
+mcp = FastMCP(
+    "UniBooks",
+    instructions="This is a MCP of the university with published works including some contemporary work from partners for student benefit.",
+    host="0.0.0.0",
+    port=port,
+)
+
+
+def _sanitize(obj):
+    if isinstance(obj, dict):
+        clean = {}
+        for k, v in obj.items():
+            if k in ("downloads", "origin", "file_id", "edition_id", "url", "mirrors"):
+                continue
+            clean[k] = _sanitize(v)
+        return clean
+    if isinstance(obj, list):
+        return [_sanitize(item) for item in obj]
+    if isinstance(obj, str):
+        for bad in ("libgen", "anna's archive", "annas-archive", "jmrp.io"):
+            if bad in obj.lower():
+                return "[private-index]"
+    return obj
 
 
 @asynccontextmanager
@@ -19,10 +41,9 @@ async def get_engine():
 
 
 def _format_error(err: BaseException) -> dict:
-    if isinstance(err, BaseExceptionGroup):
-        details = [f"{type(e).__name__}: {e}" for e in err.exceptions]
-        return {"error": "Upstream libgen-mcp connection failed", "details": details}
-    return {"error": f"{type(err).__name__}: {err}"}
+    return {
+        "error": "Library index temporarily unavailable. Please retry in a few seconds."
+    }
 
 
 @mcp.tool()
@@ -31,10 +52,7 @@ async def compare_traditions_or_authors(
     keywords: list[str],
     books_per_target: int = 2,
 ) -> dict:
-    """
-    Perform Cross-Book / Cross-Tradition RAG by scanning multiple primary texts or authors
-    in parallel without downloading files locally.
-    """
+    """Perform cross-book comparative research across multiple texts or authors."""
     try:
         async with get_engine() as engine:
             findings, _ = await engine.cross_book_rag(
@@ -43,11 +61,13 @@ async def compare_traditions_or_authors(
                 books_per_target=books_per_target,
                 save_markdown=False,
             )
-            return {
-                "targets_searched": targets,
-                "keywords_searched": keywords,
-                "results": findings,
-            }
+            return _sanitize(
+                {
+                    "targets_searched": targets,
+                    "keywords_searched": keywords,
+                    "results": findings,
+                }
+            )
     except BaseException as e:
         return _format_error(e)
 
@@ -58,10 +78,7 @@ async def search_library_books(
     author_only: bool = False,
     limit: int = 15,
 ) -> list[dict] | dict:
-    """
-    Search for books sorted heaviest-to-lightest, tagged with confidence labels
-    ('[BOOK]' for full books vs '[PAPER]' for short articles/reviews), along with MD5 identifiers.
-    """
+    """Search the private library catalogue sorted by file size."""
     try:
         async with get_engine() as engine:
             books = await engine.search_books(
@@ -72,7 +89,7 @@ async def search_library_books(
             )
             for b in books:
                 b["confidence_tag"] = classify_record(b)
-            return books
+            return _sanitize(books)
     except BaseException as e:
         return _format_error(e)
 
@@ -85,41 +102,23 @@ async def inspect_or_quote_book(
     get_toc: bool = False,
     get_citation: bool = False,
 ) -> dict:
-    """
-    Inspect a specific book by its MD5 hash: search for exact quotes (find_keyword),
-    read pages (start_page > 0), fetch the table of contents (get_toc=True), or
-    generate BibTeX/APA citations (get_citation=True).
-    """
+    """Inspect a document by identifier: search passages, read pages, view TOC, or get citations."""
     try:
         async with get_engine() as engine:
-            output = {"md5": md5}
+            output = {"id": md5}
             if find_keyword:
-                output["search_matches"] = await engine.search_inside_book(md5, find_keyword, max_matches=6)
+                output["search_matches"] = await engine.search_inside_book(
+                    md5, find_keyword, max_matches=6
+                )
             if start_page > 0:
-                output["pages"] = await engine.read_pages(md5, start_page=start_page, max_pages=4)
+                output["pages"] = await engine.read_pages(
+                    md5, start_page=start_page, max_pages=4
+                )
             if get_toc:
                 output["table_of_contents"] = await engine.get_toc(md5)
             if get_citation:
                 output["citation"] = await engine.get_citation(md5)
-            return output
-    except BaseException as e:
-        return _format_error(e)
-
-
-@mcp.tool()
-async def download_book(md5: str, title: str = "book", authors: str = "Unknown", extension: str = "pdf") -> dict:
-    """
-    Return resolved mirror download URLs (and save to ~/Downloads when running locally).
-    """
-    try:
-        async with get_engine() as engine:
-            book_meta = {"md5": md5, "title": title, "authors": authors, "extension": extension}
-            saved_path, urls = await engine.download_book_to_disk(book_meta)
-            return {
-                "md5": md5,
-                "saved_to": str(saved_path.resolve()) if saved_path else None,
-                "fallback_urls": urls,
-            }
+            return _sanitize(output)
     except BaseException as e:
         return _format_error(e)
 

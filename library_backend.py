@@ -13,7 +13,7 @@ from mcp.client.streamable_http import streamable_http_client
 ENDPOINT_URL = "https://mcp.jmrp.io/libgen"
 DEFAULT_DOWNLOAD_DIR = Path.home() / "Downloads"
 DOWNLOAD_DIR = Path(os.getenv("LIBGEN_DOWNLOAD_DIR", str(DEFAULT_DOWNLOAD_DIR))).expanduser()
-REPORTS_DIR = Path("./reports")
+REPORTS_DIR = Path(__file__).resolve().parent / "reports"
 
 
 def _parse_size_mb(size_str: str) -> float:
@@ -116,8 +116,8 @@ class LibraryEngine:
             res = await self.session.call_tool("search", arguments=args)
 
         books = []
-        if res.structured_content and "results" in res.structured_content:
-            books = res.structured_content["results"]
+        if res.structuredContent and "results" in res.structuredContent:
+            books = res.structuredContent["results"]
 
         if search_in == ["author"] and len(query.strip()) >= 2:
             q_tokens = [t.lower() for t in query.strip().split() if len(t) >= 2]
@@ -289,8 +289,8 @@ class LibraryEngine:
 
         urls = []
         # 1. Pull from structured JSON 'links' array if present
-        if res.structured_content and isinstance(res.structured_content, dict):
-            for u in res.structured_content.get("links", []):
+        if res.structuredContent and isinstance(res.structuredContent, dict):
+            for u in res.structuredContent.get("links", []):
                 clean_u = str(u).strip("\"'<> ")
                 if clean_u.startswith("http") and clean_u not in urls:
                     urls.append(clean_u)
@@ -407,37 +407,105 @@ class LibraryEngine:
 
 # --- Aligned CLI Table Formatter ---
 
-def print_books_table(books: list[dict]):
-    """Render a strictly aligned, terminal-width-aware table sorted by size."""
+_EXT_PRIORITY = {"pdf": 0, "epub": 1, "docx": 2, "doc": 3, "rtf": 4, "txt": 5}
+
+
+def _norm_title_key(title: str) -> str:
+    cleaned = "".join(ch.lower() if ch.isalnum() else " " for ch in (title or ""))
+    return " ".join(cleaned.split())
+
+
+def group_books_by_title(books: list[dict]) -> list[dict]:
+    """Merge records sharing the same normalized title into single grouped rows."""
+    groups: dict[str, dict] = {}
+    order: list[str] = []
+
+    for b in books:
+        key = _norm_title_key(b.get("title", "")) or b.get("md5", id(b))
+        ext = str(b.get("extension", "?")).lower()
+        if key not in groups:
+            entry = dict(b)
+            entry["_editions"] = [b]
+            entry["_ext_map"] = {ext: b}
+            groups[key] = entry
+            order.append(key)
+        else:
+            grp = groups[key]
+            grp["_editions"].append(b)
+            # Keep largest file per extension
+            if ext not in grp["_ext_map"]:
+                grp["_ext_map"][ext] = b
+            if not grp.get("year") and b.get("year"):
+                grp["year"] = b["year"]
+
+    grouped_list = []
+    for key in order:
+        grp = groups[key]
+        sorted_exts = sorted(grp["_ext_map"].keys(), key=lambda e: (_EXT_PRIORITY.get(e, 99), e))
+        grp["_sorted_editions"] = [grp["_ext_map"][e] for e in sorted_exts]
+        grp["_combined_fmt"] = ", ".join(e.upper() for e in sorted_exts)
+        # Default primary record follows preferred format order
+        primary = grp["_sorted_editions"][0]
+        grp["md5"] = primary.get("md5")
+        grp["size"] = primary.get("size")
+        grp["extension"] = primary.get("extension")
+        grouped_list.append(grp)
+    return grouped_list
+
+
+def resolve_book_edition(grouped_book: dict) -> dict | None:
+    """If a grouped title has multiple formats, prompt the user to choose one."""
+    editions = grouped_book.get("_sorted_editions") or [grouped_book]
+    if len(editions) == 1:
+        return editions[0]
+
+    opts = "  ".join(
+        f"[{idx}] {str(ed.get('extension', '?')).upper()} ({ed.get('size', '?')})"
+        for idx, ed in enumerate(editions, 1)
+    )
+    pick = input(f"Available formats: {opts} — Choose # (default 1): ").strip()
+    if not pick:
+        return editions[0]
+    if pick.isdigit() and 1 <= int(pick) <= len(editions):
+        return editions[int(pick) - 1]
+    return None
+
+
+def print_books_table(books: list[dict]) -> list[dict]:
+    """Group duplicate titles, render an aligned terminal table, and return grouped rows."""
     if not books:
         print("\n  No matching books found.\n")
-        return
+        return []
+
+    grouped = group_books_by_title(books) if "_sorted_editions" not in books[0] else books
 
     term_width = shutil.get_terminal_size((120, 24)).columns
-    flex_width = max(40, term_width - 48)
+    fmt_w = max(10, min(22, max(len(g.get("_combined_fmt", "")) for g in grouped)))
+    flex_width = max(36, term_width - (43 + fmt_w))
     title_w = int(flex_width * 0.65)
     author_w = flex_width - title_w
 
     header = (
-        f"  {'#':>2} | {'Type':<7} | {'Fmt':<5} | {'Size':>8} | {'Year':<4} | "
+        f"  {'#':>2} | {'Type':<7} | {'Formats':<{fmt_w}} | {'Size':>8} | {'Year':<4} | "
         f"{'Title':<{title_w}} | {'Author':<{author_w}}"
     )
     divider = "  " + "-" * (len(header) - 2)
 
     print("\n" + header)
     print(divider)
-    for i, b in enumerate(books, 1):
+    for i, b in enumerate(grouped, 1):
         tag = classify_record(b)
-        ext = str(b.get("extension", "?")).upper()
+        fmt_str = _fit(b.get("_combined_fmt") or str(b.get("extension", "?")).upper(), fmt_w)
         size = str(b.get("size", "?"))
         year = str(b.get("year") or "----")
         title = _fit(b.get("title", "Untitled"), title_w)
         author = _fit(b.get("authors", "Unknown"), author_w)
         print(
-            f"  {i:>2} | {tag:<7} | {ext:<5} | {size:>8} | {year:<4} | "
+            f"  {i:>2} | {tag:<7} | {fmt_str:<{fmt_w}} | {size:>8} | {year:<4} | "
             f"{title} | {author}"
         )
     print(divider + "\n")
+    return grouped
 
 
 # --- Interactive CLI Flows ---
@@ -480,12 +548,18 @@ async def handle_cross_book_rag(engine: LibraryEngine):
 
 async def handle_single_book_search(engine: LibraryEngine):
     print("\n--- [S] SEARCH & INSPECT SINGLE BOOK ---")
-    query = input("Search by title, author, or topic: ").strip()
+    raw = input("Search by title, author, or topic (optional flags: -pdf, -epub, -b): ").strip()
+    if not raw:
+        return
+
+    query, allowed_exts = _parse_query_and_formats(raw)
     if not query:
         return
 
-    books = await engine.search_books(query, limit=30, sort_by_size=True)
-    print_books_table(books)
+    raw_books = await engine.search_books(query, limit=30, sort_by_size=True)
+    if allowed_exts:
+        raw_books = [b for b in raw_books if str(b.get("extension", "")).lower() in allowed_exts]
+    books = print_books_table(raw_books)
     if not books:
         return
 
@@ -493,7 +567,9 @@ async def handle_single_book_search(engine: LibraryEngine):
     if not pick.isdigit() or not (1 <= int(pick) <= len(books)):
         return
 
-    book = books[int(pick) - 1]
+    book = resolve_book_edition(books[int(pick) - 1])
+    if not book:
+        return
     md5 = book["md5"]
 
     while True:
@@ -532,9 +608,32 @@ async def handle_single_book_search(engine: LibraryEngine):
             break
 
 
+STANDARD_BOOK_EXTS = {"pdf", "epub", "doc", "docx", "rtf", "txt"}
+
+
+def _parse_query_and_formats(raw_input: str) -> tuple[str, set[str]]:
+    tokens = raw_input.split()
+    query_parts = []
+    allowed_exts = set()
+    for tok in tokens:
+        if tok.startswith("-") and len(tok) > 1:
+            flag = tok[1:].lower()
+            if flag == "b":
+                allowed_exts.update(STANDARD_BOOK_EXTS)
+            else:
+                allowed_exts.add(flag)
+        else:
+            query_parts.append(tok)
+    return " ".join(query_parts).strip(), allowed_exts
+
+
 async def handle_download_by_author(engine: LibraryEngine):
     print("\n--- [D] DOWNLOAD BY AUTHOR ---")
-    author = input("Enter author name: ").strip()
+    raw = input("Enter author name (optional flags: -pdf, -epub, -docx, or -b for standard books): ").strip()
+    if not raw:
+        return
+
+    author, allowed_exts = _parse_query_and_formats(raw)
     if not author:
         return
 
@@ -543,27 +642,41 @@ async def handle_download_by_author(engine: LibraryEngine):
     if not books:
         books = await engine.search_books(author, limit=40, sort_by_size=True)
 
-    print_books_table(books)
+    if allowed_exts:
+        books = [b for b in books if str(b.get("extension", "")).lower() in allowed_exts]
+        print(f"Filtered to formats: {', '.join(sorted(e.upper() for e in allowed_exts))}")
+
+    raw_books = list(books)
+    books = print_books_table(raw_books)
     if not books:
         return
 
     while True:
-        choice = input("Enter # to download, 'F' to filter format (PDF/EPUB), or Enter to cancel: ").strip()
-        if not choice:
+        choice = input("Enter # to download, 'F' to filter formats, or 'M' / Enter for main menu: ").strip()
+        if not choice or choice.upper() == "M":
             return
         if choice.upper() == "F":
-            avail = sorted({str(b.get("extension", "")).upper() for b in books if b.get("extension")})
-            fmt = input(f"Filter by format ({', '.join(avail)}): ").strip().lower()
-            filtered = [b for b in books if str(b.get("extension", "")).lower() == fmt]
+            avail = sorted({str(b.get("extension", "")).upper() for b in raw_books if b.get("extension")})
+            fmt_raw = input(f"Filter by formats ({{', '.join(avail)}} or -b for standard books): ").strip().lower()
+            target_exts = set()
+            for part in fmt_raw.replace(",", " ").split():
+                clean = part.lstrip("-")
+                if clean == "b":
+                    target_exts.update(STANDARD_BOOK_EXTS)
+                elif clean:
+                    target_exts.add(clean)
+            filtered = [b for b in raw_books if str(b.get("extension", "")).lower() in target_exts]
             if filtered:
-                books = filtered
-                print_books_table(books)
+                raw_books = filtered
+                books = print_books_table(raw_books)
             else:
-                print(f"No '{fmt}' files found.\n")
+                print(f"No matching files found for '{fmt_raw}'.\n")
             continue
 
         if choice.isdigit() and 1 <= int(choice) <= len(books):
-            selected = books[int(choice) - 1]
+            selected = resolve_book_edition(books[int(choice) - 1])
+            if not selected:
+                continue
             print(f"\nFetching '{selected.get('title')}' ({selected.get('size')})...")
             saved, urls = await engine.download_book_to_disk(selected)
             if saved:
@@ -573,12 +686,13 @@ async def handle_download_by_author(engine: LibraryEngine):
                 for u in urls:
                     print(f"  -> {u}")
                 print()
-            return
+            print_books_table(books)
+            continue
 
 
 async def run_cli():
     print(f"Connecting to {ENDPOINT_URL}...")
-    async with streamable_http_client(ENDPOINT_URL) as (read_stream, write_stream):
+    async with streamable_http_client(ENDPOINT_URL) as (read_stream, write_stream, _):
         async with ClientSession(read_stream, write_stream) as session:
             await session.initialize()
             engine = LibraryEngine(session)
