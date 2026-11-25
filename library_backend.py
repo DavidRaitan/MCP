@@ -525,6 +525,17 @@ def find_ebook_convert() -> str | None:
 
 
 def convert_book_file(input_path: Path, target_fmt: str) -> Path | None:
+    if not input_path.exists() and not input_path.is_absolute():
+        for folder in (DEFAULT_DOWNLOAD_DIR, Path.home() / "Downloads", Path.home() / "Desktop"):
+            candidate = folder / input_path
+            if candidate.exists():
+                input_path = candidate
+                break
+
+    if not input_path.exists():
+        print(f"File not found: '{input_path}' (checked current folder, {DEFAULT_DOWNLOAD_DIR}, and ~/Downloads)\n")
+        return None
+
     fmt = target_fmt.lower().lstrip(".")
     if fmt not in CONVERTIBLE_FORMATS:
         print(f"Unsupported format '{fmt}'. Supported: {', '.join(sorted(CONVERTIBLE_FORMATS))}\n")
@@ -534,10 +545,11 @@ def convert_book_file(input_path: Path, target_fmt: str) -> Path | None:
         print("Calibre 'ebook-convert' not found. Install with: brew install --cask calibre\n")
         return None
     out_path = input_path.with_suffix(f".{fmt}")
-    print(f"Converting '{input_path.name}' -> '{out_path.name}'...")
+    print(f"Converting '{input_path.resolve()}' -> '{out_path.name}'...")
     proc = subprocess.run([converter, str(input_path), str(out_path)], capture_output=True, text=True)
     if proc.returncode != 0 or not out_path.exists():
-        print(f"Conversion failed: {proc.stderr[-250:]}\n")
+        err_msg = (proc.stderr or proc.stdout or "Unknown error").strip()
+        print(f"Conversion failed:\n{err_msg[-500:]}\n")
         return None
     print(f"Converted ({out_path.stat().st_size / 1024:.1f} KB) -> {out_path.resolve()}\n")
     return out_path
