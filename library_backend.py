@@ -510,6 +510,60 @@ def print_books_table(books: list[dict]) -> list[dict]:
 
 # --- Interactive CLI Flows ---
 
+import subprocess
+
+CONVERTIBLE_FORMATS = {"epub", "pdf", "docx", "txt", "mobi", "azw3"}
+
+
+def find_ebook_convert() -> str | None:
+    found = shutil.which("ebook-convert")
+    if found:
+        return found
+    mac_bin = "/Applications/calibre.app/Contents/MacOS/ebook-convert"
+    return mac_bin if os.path.exists(mac_bin) else None
+
+
+def convert_book_file(input_path: Path, target_fmt: str) -> Path | None:
+    fmt = target_fmt.lower().lstrip(".")
+    if fmt not in CONVERTIBLE_FORMATS:
+        print(f"Unsupported format '{fmt}'. Supported: {', '.join(sorted(CONVERTIBLE_FORMATS))}\n")
+        return None
+    converter = find_ebook_convert()
+    if not converter:
+        print("Calibre 'ebook-convert' not found. Install with: brew install --cask calibre\n")
+        return None
+    out_path = input_path.with_suffix(f".{fmt}")
+    print(f"Converting '{input_path.name}' -> '{out_path.name}'...")
+    proc = subprocess.run([converter, str(input_path), str(out_path)], capture_output=True, text=True)
+    if proc.returncode != 0 or not out_path.exists():
+        print(f"Conversion failed: {proc.stderr[-250:]}\n")
+        return None
+    print(f"Converted ({out_path.stat().st_size / 1024:.1f} KB) -> {out_path.resolve()}\n")
+    return out_path
+
+
+def prompt_post_download_convert(saved_path: Path):
+    curr = saved_path.suffix.lower().lstrip(".")
+    choices = [f for f in ("epub", "pdf", "docx", "txt") if f != curr]
+    ans = input(f"Convert to another format? ({'/'.join(choices)} or Enter to skip): ").strip().lower()
+    if ans:
+        convert_book_file(saved_path, ans)
+
+
+async def handle_convert_local_file():
+    print("\n--- [V] CONVERT LOCAL BOOK FILE ---")
+    raw_path = input("Enter file path (drag & drop file here): ").strip().strip("'").strip('"')
+    if not raw_path:
+        return
+    in_path = Path(raw_path).expanduser()
+    if not in_path.exists():
+        print(f"File not found: {in_path}\n")
+        return
+    target = input("Target format (epub, pdf, docx, txt): ").strip().lower()
+    if target:
+        convert_book_file(in_path, target)
+
+
 async def handle_cross_book_rag(engine: LibraryEngine):
     print("\n--- [C] CROSS-BOOK / CROSS-TRADITION RAG ---")
     print("Compare multiple authors, books, or traditions (e.g. 'Plato, Aristotle, Bible').")
@@ -600,6 +654,7 @@ async def handle_single_book_search(engine: LibraryEngine):
             saved, urls = await engine.download_book_to_disk(book)
             if saved:
                 print(f"Saved ({saved.stat().st_size / 1024:.1f} KB) -> {saved.resolve()}")
+                prompt_post_download_convert(saved)
             else:
                 print("Mirrors returned browser/overload pages. Direct fallback links:")
                 for u in urls:
@@ -681,6 +736,7 @@ async def handle_download_by_author(engine: LibraryEngine):
             saved, urls = await engine.download_book_to_disk(selected)
             if saved:
                 print(f"Saved ({saved.stat().st_size / 1024:.1f} KB) -> {saved.resolve()}\n")
+                prompt_post_download_convert(saved)
             else:
                 print("Mirrors returned browser/overload pages. Direct fallback links:")
                 for u in urls:
@@ -705,6 +761,7 @@ async def run_cli():
                 print("  [S] Single-Book Search & Deep Dive (Search inside, TOC, Read, Cite, Download)")
                 print("  [D] Download Books by Author (Sorted by size with [BOOK]/[PAPER] tags)")
                 print("  [B] Quick Citation Lookup (by MD5 or DOI)")
+                print("  [V] Convert Local File (PDF <-> EPUB, DOCX, TXT)")
                 print("  [O] Configure Download Folder")
                 print("  [Q] Quit")
                 choice = input("Select option: ").strip().upper()
@@ -719,6 +776,8 @@ async def run_cli():
                     ident = input("Enter book MD5 or article DOI: ").strip()
                     if ident:
                         print("\n" + await engine.get_citation(ident) + "\n")
+                elif choice == "V":
+                    await handle_convert_local_file()
                 elif choice == "O":
                     new_dir = input(
                         f"Enter new download path (or 'default' for {DEFAULT_DOWNLOAD_DIR}): "
@@ -734,4 +793,7 @@ async def run_cli():
 
 
 if __name__ == "__main__":
-    asyncio.run(run_cli())
+    if len(sys.argv) >= 4 and sys.argv[1] == "convert":
+        convert_book_file(Path(sys.argv[2]).expanduser(), sys.argv[3])
+    else:
+        asyncio.run(run_cli())
